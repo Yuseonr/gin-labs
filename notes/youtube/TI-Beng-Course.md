@@ -460,7 +460,7 @@ curl -X POST -v 'http://localhost:8080/users' \
 
 ## Setting up development
 ```
-Go 1.22
+Go 1.22<=
 Docker
 Postgres on Docker
 Swagger for docs
@@ -589,5 +589,36 @@ func (app *application) run(mux http.Handler) error{
 	return srv.ListenAndServe()
 }
 ```
-
+---
 ## Hot reloading setup
+> will be using air for auto reload
+
+> what is air ?
+air is a live reloading tool for Go applications. 
+It watches for file changes in your project and automatically rebuilds and restarts your application, making development faster and more efficient.
+
+> How to install Air ?
+```
+go install github.com/air-verse/air@latest
+```
+
+> How to initialize air ?
+
+init
+```
+air init 
+```
+
+Setelah init air bisa fokus ke configurasi :
+```
+# .air.toml
+1. exclude_dir
+2. exclude_file
+3. bin - path
+4. everything with temp change to bin
+```
+
+Run with
+```
+air 
+```
