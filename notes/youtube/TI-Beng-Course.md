@@ -497,5 +497,7 @@ Repository -> Service -> Transport
 ```
 
 ![layer](layer.png)
+
 ---
+
 ## Setting up HTTP Server
