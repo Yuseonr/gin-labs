@@ -457,3 +457,45 @@ curl -X POST -v 'http://localhost:8080/users' \
 ```
 
 ---
+
+## Setting up development
+```
+Go 1.22
+Docker
+Postgres on Docker
+Swagger for docs
+Golang migrate for migrations
+```
+
+### Folder Structure
+> membagi busniess logic dan routing handler agar lebih clean dan maintainable
+```
+├── bin
+├── cmd
+│   ├── api
+│   └── migrate
+│       └── migrations
+├── docs
+├── internal
+└── scripts
+```
+
+1. **Separation of concern** : Tiap level pada program harus di pisahkan dengan barrier yang clear, transport layer, service layer, storage layer
+2. **Dependency Inversion Principle (DIP)** : Kamu menginject dependency ke layer mu, bukan langsung memanggilnya agar membuat loose coupling dan memudahkan testing
+3. **Adaptability to change** : dengan mengorganisasi kode kita secara modular kita bisa dengan mudah menambah fitur, refactor kode, atau merespon terhadap perubahan rbusiness requirment dengan lebih mudah. Sistem harus dirancang supaya dapat dengan mudah dirubah tanpa mengganggu bagian lain dari kode
+4. **Focus on Busineess Value** : focus on adding or delivering value to user as they are the one responsible for paying your bills. 
+
+### Layers
+> Pada struktur ini kita akan membagi ke tiga layer yaitu Transport, Service dan Storage, namun kita bisa nge ommit service karena hanya simple nanti
+1. Transport layer : bagaimana cara kita deliver message to user, misal sekarang HTTP
+2. Service Layer : business logic, misal kita mau bikin user baru, maka service layer yang akan handle logic nya
+3. Storage Layer : bagaimana cara kita menyimpan data, misal kita mau simpan user, abstraksi antara service layer dengan misal database
+
+> Injection 
+```
+Repository -> Service -> Transport
+```
+
+![layer](layer.png)
+---
+## Setting up HTTP Server
