@@ -622,3 +622,70 @@ Run with
 ```
 air 
 ```
+
+--- 
+
+## Environment Variables
+> env var adalah variable yang digunakan untuk menyimpan konfigurasi aplikasi yang bisa diubah tanpa harus mengubah kode sumber. 
+Biasanya digunakan untuk menyimpan informasi sensitif seperti API keys, database credentials, atau konfigurasi yang berbeda antara lingkungan development, staging, dan production.
+
+contoh penerapan membuat ambil env var di Go :
+```Go
+package env
+
+// bisa pake library env eksternal, tapi ini cara ngelakuin manual
+
+import (
+	"os"
+	"strconv"
+)
+
+// Get string value enviroment variable dari native golang
+func GetString(key, fallback string) string {
+	val, ok := os.LookupEnv(key)
+	if !ok {
+		return fallback
+	}
+	return val
+}
+
+// Get Int value enviroment variable
+func GetInt(key string, fallback int) int {
+	val, ok := os.LookupEnv(key)
+	if !ok {
+		return  fallback
+	}
+
+	valAsInt, err := strconv.Atoi(val)
+	if err != nil {
+		return fallback
+	}
+
+	return valAsInt
+}
+```
+
+### .envrc
+Now how to read from .env file ? we will not be using godotenv but using .envrc
+what is it ? is a way to set env var in shell session via .envrc file. It is part of the direnv tool, which automatically loads and unloads environment variables based on the current directory.
+
+> we will be using direnv to load env var from .envrc file.
+
+How to install direnv ?
+```
+brew install direnv
+```
+
+How to setup direnv ?
+```
+add direnv hook bash/zsh/fish to your shell configuration file (e.g., .bashrc, .zshrc, or .config/fish/config.fish)
+
+zsh
+echo 'eval "$(direnv hook zsh)"' >> ~/.zshrc
+```
+```
+direnv allow .
+```
+> above will allow direnv to load env var from .envrc file in current directory.
+
+>! direnv will ask for permission everytime it changes so be sure to run `direnv allow` after editing .envrc file.
