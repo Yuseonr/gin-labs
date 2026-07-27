@@ -689,3 +689,318 @@ direnv allow .
 > above will allow direnv to load env var from .envrc file in current directory.
 
 >! direnv will ask for permission everytime it changes so be sure to run `direnv allow` after editing .envrc file.
+
+---
+
+## Repository Pattern 
+> connect to database, abstract away etc
+worse code : where business logic is coupled with database logic, making it hard to test and maintain.
+
+### Claude : Context: Kenapa Dioper-oper Terus?
+
+**1. Apa itu `context.Context`?**
+
+`context.Context` adalah amplop yang nempel di setiap request. Isinya tiga hal yang ngikut dari layer terluar (HTTP handler) sampai ke layer paling dalam (database call):
+
+```
+┌──────────────────────────────────────────────┐
+│  context.Context                              │
+│                                               │
+│  Deadline     : request ini expired jam       │
+│                 10:00:03, jangan proses lagi  │
+│  Cancellation : client udah nutup koneksi,   │
+│                 stop semua kerjaan!           │
+│  Values       : request ID, user info,        │
+│                 tracing data                  │
+└──────────────────────────────────────────────┘
+```
+
+`context.Context` itu **interface** dengan 4 method:
+- `Deadline()` : kapan context ini expired (waktu absolut)
+- `Done()` : return channel yang ke-close saat context di-cancel atau expired
+- `Err()` : kenapa context selesai? `nil` kalau masih hidup, `context.Canceled` kalau di-cancel manual, `context.DeadlineExceeded` kalau timeout
+- `Value(key)` : ambil data yang diselipin middleware
+
+Semua operasi I/O di Go (database, HTTP client, gRPC) nerima `context.Context` sebagai parameter pertama.
+
+**2. Kenapa Parameter Pertama dan Bukan Ditaruh di Struct?**
+
+```go
+// ❌  BAD: context di struct
+type PostsStore struct {
+    db  *sql.DB
+    ctx context.Context  // jangan begini!
+}
+
+// ✅ GOOD: context sebagai parameter pertama (idiomatic Go)
+func (s *PostsStore) Create(ctx context.Context, post *Post) error { ... }
+```
+
+Alasan context jangan disimpen di struct:
+- Satu request = satu context. Kalau disimpen di struct, context-nya kepake buat semua request (bahaya: context pertama udah expired, request kedua ikut ke-cancel)
+- Context itu request-scoped, bukan object-scoped. Store hidup lama (seumur aplikasi), context hidup pendek (seumur request)
+- Explicit > implicit. Begitu liat parameter pertama `ctx`, kamu langsung tahu fungsi ini jalan di dalam sebuah request
+
+Perbandingan sama framework lain: Django/Spring nyimpen context di thread-local (ga kelihatan di function signature). Di Go, context selalu eksplisit sebagai parameter.
+
+**3. Gimana Context Mengalir: Dari Request Sampai Database**
+
+```
+HTTP Request masuk (bareng context dari Go stdlib)
+        │
+        ▼
+┌───────────────────────────────────────────────────┐
+│  chi.Router + Middleware                           │
+│                                                    │
+│  middleware.Timeout    -> inject deadline 60s      │
+│  middleware.RequestID  -> inject requestID value   │
+│  middleware.Logger     -> baca values buat log     │
+│                                                    │
+│  Semua middleware nerima & lempar context          │
+│  lewat r.WithContext(ctx) supaya context makin     │
+│  kaya nilai-nya seiring jalan ke handler           │
+└──────────────────────┬────────────────────────────┘
+                       │
+                       ▼
+┌───────────────────────────────────────────────────┐
+│  Transport Layer (Handler)                        │
+│                                                    │
+│  func (app *application) createPostHandler(       │
+│      w http.ResponseWriter,                        │
+│      r *http.Request,                              │
+│  ) {                                               │
+│      ctx := r.Context()                            │
+│                                                    │
+│      var post Post                                 │
+│      json.NewDecoder(r.Body).Decode(&post)         │
+│      //            ▲                                │
+│      // r.Body cuma dipake disini,                 │
+│      // ga ikut turun ke store!                    │
+│                                                    │
+│      app.store.Posts.Create(ctx, &post) ──────────┐│
+│  }                                                 ││
+└────────────────────────────────────────────────────┘│
+                       │                              │
+                       ▼                              │
+┌───────────────────────────────────────────────────┐ │
+│  Storage Layer (Repository)                       │ │
+│                                                    │ │
+│  func (s *PostsStore) Create(                     │◄┘
+│      ctx context.Context,                          │
+│      post *Post,                                   │
+│  ) error {                                        │
+│      // Store ga peduli request dari HTTP,         │
+│      // gRPC, CLI, atau background worker.        │
+│      // Dia cuma peduli: "ini context, ini data"  │
+│      return s.db.QueryRowContext(                 │
+│          ctx,                                      │
+│          `INSERT INTO posts (title, content)       │
+│           VALUES ($1, $2) RETURNING id`,           │
+│          post.Title, post.Content,                 │
+│      ).Scan(&post.ID)                             │
+│  }                                                 │
+└────────────────────────────────────────────────────┘
+```
+
+**Ini kuncinya**: Handler adalah **batas antara dunia HTTP dan dunia bisnis**. Semua data HTTP (header, body, params) diekstrak di handler. Yang turun ke store cuma context + data bisnis yang udah bersih. Store nggak tahu dan nggak boleh tahu soal HTTP.
+
+**4. Kenapa Bukan `gin.Context` atau `*http.Request` yang Dioper ke Bawah?**
+
+```
+❌  func (s *PostsStore) Create(c *gin.Context, post *Post) error
+    Akibat:
+    - Store coupled ke Gin. Gabisa dipake di gRPC / CLI / worker
+    - Testing harus bikin gin.Context dulu (ribet, perlu setup Gin engine)
+    - Import cycle risk: store import Gin, Gin handler import store
+
+✅  func (s *PostsStore) Create(ctx context.Context, post *Post) error
+    Akibat:
+    - Store cuma bergantung ke standard library
+    - Testing tinggal ctx := context.Background()
+    - Bisa dipake dari transport layer apapun
+```
+
+Kalau kamu pake Gin: tetep ekstrak `c.Request.Context()` buat dikirim ke store. `gin.Context` cuma dipake di handler layer, yaitu buat akses `c.Query()`, `c.Param()`, `c.JSON()`, dsb. Jangan pernah lempar `gin.Context` bulat-bulat ke bawah.
+
+Yang bikin bingung: `gin.Context` **embed** `context.Context` (via `c.Request.Context()`), jadi secara teknis `gin.Context` juga implement interface `context.Context`. Tapi tetep jangan dikirim ke store karena dia bawa baggage HTTP yang nggak relevan.
+
+**5. Context Values: Nyelipin Data Tambahan**
+
+Middleware nyuntik nilai ke context, handler/store ambil lagi:
+
+```go
+// Middleware nyuntik request ID
+func RequestIDMiddleware(next http.Handler) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        ctx := context.WithValue(r.Context(), "requestID", uuid.New().String())
+        next.ServeHTTP(w, r.WithContext(ctx))
+        // r.WithContext(ctx) bikin *http.Request baru dengan context yang diperkaya
+        // (context immutable: WithValue nggak ngubah context lama, dia bikin turunan baru)
+    })
+}
+
+// Di store, ambil buat logging
+func (s *PostsStore) Create(ctx context.Context, post *Post) error {
+    reqID, _ := ctx.Value("requestID").(string)
+    log.Printf("[%s] inserting post: %s", reqID, post.Title)
+    return s.db.QueryRowContext(ctx, "INSERT INTO posts ...").Scan(&post.ID)
+}
+```
+
+Context Values sebaiknya cuma dipake buat **cross-cutting concerns** (request ID, tracing, auth token), jangan buat ngoper **business data**. Kalau kamu butuh ngirim data bisnis ke store, jadikan parameter eksplisit.
+
+**6. Cancellation & Timeout: Jangan Buang-buang Resource**
+
+Ini use case paling penting dari context. Begitu context di-cancel (client nutup browser, timeout middleware, atau kamu cancel manual), semua operasi yang pake context itu harus berhenti.
+
+```
+waktu ──────────────────────────────────────────────────────────►
+
+Client ──POST /posts──► Server ──INSERT INTO posts──► Database
+  │                        │                            │
+  │                        │                     (query jalan...
+  │                        │                      butuh 3 detik)
+  │                        │                            │
+  │   (user nutup tab)     │                            │
+  │── TCP close ──────────►│                            │
+  │                        │                            │
+  │                   ctx.Done()                        │
+  │                   channel ke-close                  │
+  │                        │                            │
+  │                   QueryRowContext                   │
+  │                   batalin query ───────────────────►│
+  │                        │                            │
+  │                        │◄── canceled, conn freed ───│
+  │                        │
+  │              DB connection balik ke pool
+  │              CPU nggak ngerjain kerjaan sia-sia
+```
+
+```go
+func (s *PostsStore) Create(ctx context.Context, post *Post) error {
+    err := s.db.QueryRowContext(ctx,
+        "INSERT INTO posts (title, content) VALUES ($1, $2) RETURNING id",
+        post.Title, post.Content,
+    ).Scan(&post.ID)
+
+    if err != nil {
+        // Cek kenapa gagal
+        switch {
+        case errors.Is(err, context.Canceled):
+            // client nutup koneksi, bukan salah kita
+            return err
+        case errors.Is(err, context.DeadlineExceeded):
+            // query kelamaan, mungkin perlu di-optimize
+            return err
+        default:
+            return err
+        }
+    }
+    return nil
+}
+```
+
+**Cara bikin context dengan timeout sendiri:**
+
+```go
+// Level seluruh request (dari middleware)
+r.Use(middleware.Timeout(60 * time.Second))
+
+// Level operasi spesifik (di store)
+func (s *PostsStore) HeavyQuery(ctx context.Context) error {
+    ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+    defer cancel()  // PENTING: selalu defer cancel, meskipun operasi sukses
+    // kalau nggak di-defer, context bocor (goroutine + timer nggak dibersihin)
+
+    return s.db.QueryRowContext(ctx, "SELECT pg_sleep(10)").Scan()
+    // gagal setelah 5 detik: context.DeadlineExceeded
+}
+```
+
+Kenapa `defer cancel()` wajib meskipun sukses? `context.WithTimeout` bikin goroutine internal buat timer. Kalau `cancel` nggak dipanggil, goroutine + timer itu tetap hidup sampe timeout beneran terjadi (5 detik kemudian). Buat operasi yang cepet selesai (10ms), itu 5 detik resource kebuang.
+
+**7. Context Tree: Parent dan Child**
+
+Context itu kayak pohon keluarga. Cancel parent, semua child ikut ke-cancel:
+
+```
+context.Background()                    akar, nggak pernah expire
+    │
+    └── r.Context()                     dari net/http, hidup = seumur request
+            │
+            ├── context.WithTimeout()   buat operasi spesifik (5 detik)
+            ├── context.WithValue()     buat nyelipin request ID
+            └── context.WithCancel()    buat operasi yang bisa di-cancel manual
+```
+
+Jika request context di-cancel (timeout 60s middleware), semua turunannya ikut ke-cancel. Tapi kalau child timeout 5s ke-trigger lebih dulu, child-nya aja yang cancel, parent tetap hidup (request masih bisa ngerjain hal lain).
+
+**8. Testing Jadi Gampang**
+
+```go
+func TestCreatePost(t *testing.T) {
+    store := &PostsStore{db: testDB}
+
+    // Cuma perlu ini, ga perlu spin up HTTP server
+    ctx := context.Background()
+
+    err := store.Create(ctx, &Post{Title: "test", Content: "hello"})
+    assert.NoError(t, err)
+}
+```
+
+Bandingin kalau store nerima `gin.Context`: harus bikin Gin engine, bikin request palsu, setup router. Dengan `context.Context`, testing cukup `context.Background()`.
+
+Untuk test yang perlu timeout/cancellation:
+```go
+func TestCreatePostTimeout(t *testing.T) {
+    ctx, cancel := context.WithTimeout(context.Background(), 1*time.Millisecond)
+    defer cancel()
+
+    store := &PostsStore{db: testDB}
+    err := store.Create(ctx, &Post{Title: "test"})
+
+    assert.ErrorIs(t, err, context.DeadlineExceeded)
+}
+```
+
+**9. Kapan Function Perlu Parameter Context?**
+
+```
+┌─────────────────────────────────────────────────────┐
+│  PERLU ctx jika:                                     │
+│  - I/O operations (database, HTTP call, file)        │
+│  - Long-running computation yang bisa di-cancel      │
+│  - Memanggil function lain yang butuh context        │
+│  - Intinya: kalau function ada di path request,      │
+│    context harus jadi param pertama                   │
+│                                                       │
+│  TIDAK PERLU ctx jika:                                │
+│  - Pure computation / transformation (ga ada I/O)    │
+│  - Simple helper / utility functions                  │
+└─────────────────────────────────────────────────────┘
+```
+
+**Rangkuman Flow Context Dari Atas Sampai Bawah**
+
+```
+net/http bikin context dari request masuk
+    │
+    ▼
+middleware perkaya context (deadline, request ID, dll)
+    │
+    ▼
+handler ekstrak payload HTTP, ambil ctx := r.Context()
+handler panggil store.Create(ctx, dataBisnis)
+    │
+    ▼
+store.Create(ctx, post)
+    ├── ctx dipake buat QueryRowContext (database)
+    ├── ctx.Value("requestID") buat logging
+    └── ctx.Done() otomatis cancel query kalau client timeout/cabut
+    │
+    ▼
+semua layer pakai context yang sama
+nggak ada yang tahu request dari HTTP, gRPC, atau CLI
+yang mereka tahu: deadline, cancellation, values
+```
