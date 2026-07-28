@@ -1066,5 +1066,84 @@ func (s *PostStore) Create(ctx context.Context, post *Post) error {
 	return nil
 }
 ```
-
+---
 ## DB Connection
+
+```Go
+package db
+
+import (
+	"context"
+	"database/sql"
+	"time"
+)
+
+func New(dsn string, maxOpenConns, MaxIdleConns int, maxIdleTime string) (*sql.DB, error) {
+	db, err := sql.Open("postgres", dsn)
+	if err != nil {
+		return nil, err
+	}
+
+	db.SetMaxOpenConns(maxOpenConns)
+	db.SetMaxIdleConns(MaxIdleConns)
+
+	duration, err := time.ParseDuration(maxIdleTime)
+	if err != nil {
+		return nil, err
+	}
+	
+	db.SetConnMaxIdleTime(duration)
+
+	// if it takes more than 5 second to connect then timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err = db.PingContext(ctx); err != nil {
+		return nil, err
+	}
+
+	return db, nil
+}
+```
+
+```Go
+cfg := config{
+		addr: env.GetString("ADDR", ":8080"),
+		db: dbConfig{
+			dsn: env.GetString("DB_DSN", "host=localhost port=5432 user=admin password=adminpassword dbname=social sslmode=disable"),
+			maxOpenConns: env.GetInt("DB_MAX_OPEN_CONNS", 30), // higher number = higher concurent query (atleast what i understand)
+			maxIdleConns: env.GetInt("DB_MAX_IDLE_CONNS", 30), // number of open connection in connection pool
+			maxIdleTime: env.GetString("DB_MAX_IDLE_TIME", "15m"),
+		},
+	}
+
+	db, err := db.New(cfg.db.dsn, 
+		cfg.db.maxOpenConns, 
+		cfg.db.maxIdleConns, 
+		cfg.db.maxIdleTime)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	defer db.Close()
+	log.Println("database conn established")
+```
+
+```dockerfile
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: social-db
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: adminpassword
+      POSTGRES_DB: social
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+volumes:
+  pgdata:
+
+```
