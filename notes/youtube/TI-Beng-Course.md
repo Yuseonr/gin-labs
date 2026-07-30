@@ -1147,3 +1147,295 @@ volumes:
   pgdata:
 
 ```
+## SQL Migrations 
+> menggunakan golang-migrate untuk mengatur versi database schema, sehingga kita bisa menambah, mengubah, atau menghapus tabel/kolom dengan aman dan terkontrol.
+
+Q : kenapa kita perlu migration tool ? <br>
+A : karena kita tidak bisa mengubah schema database secara manual di production, karena bisa menyebabkan data loss atau downtime. Migration tool membantu kita mengelola perubahan schema secara versioned dan reversible. 
+
+Jadi berbeda dengan sekedar mengubah sql model atau script pada development yang dimana kita bisa langsung mengubah, mengganti / docker compose down docker compose up, tapi di production kita tidak bisa begitu karena bisa menyebabkan data loss atau downtime.
+
+Nah migration ini berfungsi agar perubahan itu bertahap dan setiap perubahan tidak mengganggu data yang sudah ada. Jadi kita bisa menambah kolom baru, mengubah tipe data, atau menghapus kolom lama dengan aman. 
+
+### How to install golang-migrate
+
+```bash
+brew install golang-migrate
+```
+
+> migration command
+```bash
+# create migration file
+migrate create -seq -ext sql -dir ./cmd/migrate/migrations create_users_table
+
+-seq : untuk membuat migration file dengan urutan nomor, misal 000001_create_users_table.up.sql dan 000001_create_users_table.down.sql.
+-ext sql : untuk membuat migration file dengan ekstensi .sql
+-dir : untuk menentukan direktori tempat menyimpan migration file, misal ./cmd/migrate/migrations
+
+# run migration up
+migrate -path ./cmd/migrate/migrations -database "postgres://admin:adminpassword@localhost:5432/social?sslmode=disable" up
+# run migration down
+migrate -path ./cmd/migrate/migrations -database "postgres://admin:adminpassword@localhost:5432/social?sslmode=disable" down
+```
+> bisa buat make file untuk mempermudah menjalankan command migrate
+
+```bash
+MIGRATIONS_PATH = ./cmd/migrate/migrations
+DB_DSN ?= postgres://admin:adminpassword@localhost:5432/social?sslmode=disable
+
+
+.PHONY: migrate-create
+migration:
+	@migrate create -seq -ext sql -dir $(MIGRATIONS_PATH) $(filter-out $@,$(MAKECMDGOALS))
+
+.PHONY: migrate-up
+migrate-up:
+	@migrate -path=$(MIGRATIONS_PATH) -database=$(DB_DSN) up
+
+.PHONY: migrate-down
+migrate-down:
+	@migrate -path=$(MIGRATIONS_PATH) -database=$(DB_DSN) down $(filter-out $@,$(MAKECMDGOALS))
+```
+
+
+---
+
+### Claude - Visualisasi Konsep Migration
+
+Bayangkan skema database sebagai sebuah bangunan. Kamu tidak bisa merobohkan seluruh lantai hanya untuk menambah satu jendela (seperti `docker compose down` di development). Kamu harus menambah jendela itu dengan aman tanpa mengganggu orang di dalam bangunan (data di production).
+
+```text
+Database versi 1 (V1)
+[ Tabel Users: id, name ]
+       │
+       │ (Migration Up: tambah kolom 'email') 
+       │ file: 000001_add_email_to_users.up.sql
+       ▼
+Database versi 2 (V2)
+[ Tabel Users: id, name, email ]
+       │
+       │ (Migration Down: hapus kolom 'email' jika ada bug) 
+       │ file: 000001_add_email_to_users.down.sql
+       ▼
+Database versi 1 (V1) kembali seperti semula
+```
+
+### Bagaimana Migration Bekerja (Contoh File)
+
+Setiap perubahan schema biasanya dipisah menjadi 2 file: `UP` (untuk apply perubahan maju) dan `DOWN` (untuk mundur / rollback perubahan).
+
+1. `000001_create_users_table.up.sql`
+```sql
+CREATE TABLE users (
+    id SERIAL PRIMARY KEY,
+    username VARCHAR(50) NOT NULL
+);
+```
+
+2. `000001_create_users_table.down.sql`
+```sql
+DROP TABLE IF EXISTS users;
+```
+
+### Benefits (Manfaat Utama)
+1. **Version Control untuk Database**: Layaknya Git untuk kodemu, migration adalah Git untuk struktur databasemu. Kita bisa melacak siapa yang mengubah struktur, apa yang diubah, dan kapan.
+2. **Kolaborasi Tim yang Sinkron**: Jika Developer A menambah tabel X, dan Developer B menambah tabel Y, migration tool memastikan kedua perubahan bisa digabungkan dengan urutan yang benar di database tujuan tanpa konflik manual.
+3. **Rollback yang Terukur**: Jika deploy ke production menyebabkan error karena perubahan struktur, kita bisa dengan cepat menjalankan perintah `migrate down` untuk mengembalikan struktur ke versi stabil sebelumnya.
+4. **Automasi CI/CD**: Sangat mudah diintegrasikan dalam pipeline deployment. Server bisa di-setting otomatis menjalankan skrip migrasi setiap kali ada deploy kode baru.
+
+### Pros (Kelebihan)
+- **Konsistensi Lingkungan**: Menjamin bahwa struktur database di Development, Staging, dan Production itu 100% identik.
+- **Auditability**: Menyediakan jejak sejarah perubahan schema yang jelas dari awal project dibuat sampai kondisi saat ini.
+- **Mengurangi Human Error**: Tidak ada lagi cerita aplikasi error karena *"Lupa jalanin query `ALTER TABLE` di server production"*, karena semua perubahan terotomatisasi lewat file kode.
+
+### Cons (Kekurangan)
+- **Learning Curve & Disiplin**: Tim butuh waktu belajar tool baru (seperti golang-migrate) dan harus membiasakan diri **tidak** mengubah database secara manual via GUI (seperti DBeaver/pgAdmin) lagi, karena akan merusak state migration.
+- **Manajemen Data vs Schema**: Migration tool umumnya sangat bagus untuk mengubah *struktur* (schema), tapi kadang cukup rumit jika digunakan untuk migrasi *data* yang kompleks (seperti membaca isi satu kolom, memproses string-nya, lalu memecahnya ke dua kolom baru).
+- **Rollback Bisa Berbahaya (Data Loss)**: Jika kamu melakukan `migrate down` pada perintah `DROP COLUMN` di production, maka kolom beserta seluruh **datanya** akan benar-benar hilang permanen dan tidak akan kembali walau kamu melakukan `migrate up` lagi (kecuali kamu punya sistem backup database terpisah).
+
+---
+
+### Enterprise Use-Case: Studi Kasus Database Genshin Impact 🎮
+
+**Q:** *Gimana misal Genshin Impact ingin menambahkan aturan/fitur baru tapi data lama belum punya kolomnya? Apakah mereka dari awal merencanakan ratusan tabel & kolom "jaga-jaga" (redundancy) agar kedepannya gampang?*
+
+**A:** **TIDAK.** Membuat banyak tabel dan kolom kosong/redundant di awal untuk "jaga-jaga" adalah *bad practice*. Untuk game dengan puluhan juta pemain aktif, ratusan kolom tak terpakai akan membuang resource storage yang masif dan memperlambat performa *query* database. 
+
+Perusahaan skala Enterprise (seperti HoYoverse) merancang *schema* seringan dan sesimpel mungkin sesuai kebutuhan saat ini, lalu berevolusi menggunakan **Migration** seiring berjalannya waktu.
+
+Berikut adalah beberapa skenario nyata bagaimana tim *engineer* memanfaatkan alat Migrasi Database di Production:
+
+#### Skenario 1: Menambah Aturan Baru ke Data Lama (Data Backfilling)
+**Kasus:** Dulu Genshin tidak punya sistem **"World Level"**. Tiba-tiba di *patch* baru, mereka ingin menambahkan fitur ini yang otomatis terhitung dari *Adventure Rank (AR)* pemain.
+
+Mereka tidak bisa asal mengeksekusi `ALTER TABLE players ADD COLUMN world_level INT NOT NULL;`. Kenapa? Karena puluhan juta data player lama nilai `world_level`-nya akan kosong (NULL), dan database akan langsung *crash* / *error* karena menolak aturan `NOT NULL` tersebut.
+
+**Solusi Migration (Multi-step):**
+Alih-alih langsung mengubah, mereka memecahnya dalam beberapa tahap migrasi:
+1. **Migration 1 (Schema UP):** Tambahkan kolom baru yang *boleh kosong* (Nullable).
+   `ALTER TABLE players ADD COLUMN world_level INT;`
+2. **Migration 2 (Data Backfill):** Menjalankan *script* perpindahan data (*data migration*) di *background*. *Script* ini akan membaca kolom `AR` setiap pemain lama, menghitung nilainya, lalu meng-update kolom `world_level`. Proses ini dieksekusi secara *batch* (dicicil misal per 10.000 pemain) agar server database tidak nge-*lag* atau *downtime* saat pemain sedang asik bermain.
+3. **Migration 3 (Constraint UP):** Setelah semua jutaan data player lama 100% terisi, barulah mereka merilis *migration* terakhir untuk mengunci kolom tersebut.
+   `ALTER TABLE players ALTER COLUMN world_level SET NOT NULL;`
+
+#### Skenario 2: Mengubah Tipe Data (Mencegah Integer Overflow)
+**Kasus:** Pernah ada kasus di mana batas maksimal *damage* (misalnya *damage* karakter Eula) mentok di angka 2.1 Milyar? Itu terjadi karena tipe data *damage* di database awalnya menggunakan `INT32` (batas maksimum 2.147.483.647).
+
+Ketika pemain bertambah kuat, HoYoverse harus mengubahnya menjadi `BIGINT` (INT64).
+Dengan *migration tool*, mereka cukup membuat satu file:
+`ALTER TABLE combat_logs ALTER COLUMN max_damage TYPE BIGINT;`
+Kelebihannya: File migrasi ini akan otomatis didistribusikan dan dieksekusi oleh sistem CI/CD ke **semua server di dunia** (Asia, America, Europe, TW/HK/MO). Bayangkan jika harus manual lewat UI *database*, tim Database Administrator (DBA) bisa saja kelupaan mengubah server Europe, yang akan mengakibatkan *bug* hanya di server tersebut.
+
+#### Skenario 3: Siklus Hidup Fitur Event (Misal: Lantern Rite)
+Genshin memiliki banyak *mini-game event* yang sifatnya sementara.
+- **Rilis Event (Patch 4.4):** CI/CD menjalankan file **Migrate UP** untuk membuat tabel khusus seperti `lantern_rite_scores`.
+- **Event Selesai (Patch 4.5):** Tabel tidak langsung dihapus. Tim Data Analyst masih butuh membaca tabel tersebut untuk rekap pembagian hadiah (primogems).
+- **Pembersihan (Patch 4.6):** Sebulan kemudian, setelah semua data di-rekap atau di-arsip (*archived*), *engineer* merilis file **Migrate UP** baru yang berisi `DROP TABLE lantern_rite_scores;`. Ini berfungsi membersihkan *database* dari sampah *event* lama, menjaga *database* tetap ramping dan responsif.
+
+#### Skenario 4: Web Event "Anniversary Recap" (Teyvat Times / Web Event Tahunan)
+**Kasus:** Setiap perayaan Anniversary (ulang tahun Genshin), pemain disuguhkan Web Event khusus yang menampilkan statistik personal. Contoh: *"Kamu telah membunuh 45.213 Hilichurl", "Menit bermainmu 1.200 jam", "Bos yang paling sering kamu kalahkan adalah Oceanid"*.
+
+**Pertanyaan:** *Apakah fitur rekap ini sudah direncanakan dan dibuat tabel khususnya sejak hari pertama Genshin rilis?*
+**Jawaban:** **TIDAK.** Data rekap tahunan ini tidak menggunakan *real-time database server* utama (OLTP) tempat pemain bermain.
+
+Skenario eksekusi Enterprise untuk fitur ini adalah penggabungan **Telemetry/Logs**, **Data Warehouse (OLAP)**, dan **Data Pipeline**, tanpa mengganggu database operasional game:
+
+1. **Pengumpulan Data Mentah (Sejak Hari 1):** 
+   Setiap tindakan pemain (membunuh monster, *login*, buka *chest*) dicatat bukan dengan `UPDATE table SET hilichurl_killed = hilichurl_killed + 1`. Melainkan dicatat sebagai **Event Logs** / **Telemetry** (contoh: Kafka/RabbitMQ) yang terus mengalir ke luar dari server game.
+   *Log format: `{"timestamp": "...", "uid": "123", "action": "kill_monster", "monster_id": "hilichurl"}`*
+   Log ini disimpan di sistem *Big Data* / *Data Warehouse* (seperti AWS Redshift, Google BigQuery, atau Snowflake) yang dirancang khusus untuk menyimpan triliunan baris data historis.
+
+2. **Perencanaan Event (Mendekati Anniversary):**
+   Tim produk meminta tim *Data Engineer* membuat rekap. Mereka tidak membuat "tabel rekap" dari awal game rilis. Mereka baru membuat tabel tersebut di *database* terpisah khusus untuk Web Event *menjelang event*.
+   - Menggunakan **Migration Tool**, mereka membuat skema baru:
+     `CREATE TABLE anniversary_recap_2024 (uid INT, hilichurl_kills INT, total_playtime_minutes INT);`
+
+3. **Data Pipeline & Aggregation (Data Backfill Skala Besar):**
+   - Menjelang *event*, *Data Engineer* menjalankan *batch job* (seperti Apache Spark atau Hadoop) di *Data Warehouse*.
+   - *Job* ini melakukan *query* berat untuk menghitung ("merangkum") miliaran *log* aktivitas selama setahun terakhir.
+   - Hasil hitungan matangnya (contoh: *UID 123 bunuh 50.000 hilichurl*) lalu di-*push* / disuntikkan ke tabel `anniversary_recap_2024` tadi.
+
+4. **Web Event Berjalan:**
+   Ketika kamu membuka Web Event di browser, *backend* web hanya perlu melakukan *query* super ringan: 
+   `SELECT hilichurl_kills FROM anniversary_recap_2024 WHERE uid = 123;`
+   Tidak ada proses kalkulasi sama sekali saat *event* berlangsung, dan server game utama sama sekali tidak terganggu kinerjanya.
+
+**Kesimpulan Utama Enterprise Database:** 
+Enterprise *tidak* membuat ratusan tabel rekap di *database* transaksional sejak awal (karena akan mencekik performa server game). Mereka mengumpulkan **data mentah (logs)** secara masif. Ketika butuh fitur baru (walau baru terpikir 2 tahun kemudian), mereka tinggal menarik log tersebut, merangkumnya lewat *Data Pipeline*, membuat *schema* database baru menggunakan **Migration**, lalu menyajikan hasilnya.
+
+#### Skenario 5: Sistem "Epitomized Path" (Weapon Banner Pity)
+**Konteks Bisnis (Patch 1.0 - 1.5):**
+Awalnya, *Weapon Banner* murni menggunakan RNG (*Random Number Generation*) 50/50 antara dua senjata bintang 5. Pemain (*whale*) bisa menghabiskan ribuan dolar tanpa jaminan mendapatkan senjata spesifik yang mereka inginkan karena tidak ada *hard pity* untuk senjata tertentu.
+
+**Business Rule Baru (Diperkenalkan di Patch 2.0):**
+HoYoverse merilis fitur **Epitomized Path**. Pemain kini bisa "memilih" senjata target. Jika mereka mendapat senjata bintang 5 lain, mereka mendapat 1 *Fate Point*. Saat mencapai 2 *Fate Points*, senjata bintang 5 berikutnya 100% adalah senjata pilihan tersebut. **Aturan krusialnya: Fate Point hangus dan di-reset ke 0 saat banner berganti setiap 21 hari.**
+
+**Masalah Arsitektur Database:**
+Sebelumnya, *gacha system* (Wish) hanya perlu membaca 1 kolom di tabel pemain: `weapon_banner_pity_count`. Sangat ringan. Dengan aturan baru, sistem harus menyimpan *state* tambahan:
+1. Senjata apa yang sedang dipilih?
+2. Berapa jumlah *Fate Point* saat ini?
+
+**Masalah terbesar adalah aturan hangus**. Jika HoYoverse menjalankan perintah `UPDATE users SET fate_points = 0` kepada puluhan juta pemain secara serentak setiap kali banner berganti di jam 12 malam, server database utama (OLTP) akan mengalami *Table Lock* massal. *Ping* akan melonjak, dan pemain yang sedang berada di dalam domain (Spiral Abyss) akan terputus dari server (disconnected).
+
+**Eksekusi Migrasi & Data Flow (Lazy Evaluation Pattern):**
+HoYoverse tidak melakukan *batch update* untuk mereset poin. Mereka merombak *data flow* menggunakan teknik **Lazy Evaluation**.
+
+1. **Schema UP:** Engineer menambahkan kolom `epitomized_target` (ID senjata), `fate_points` (INT), dan `last_banner_epoch_id` (INT) ke dalam tabel `user_gacha_states`.
+2. **Read/Write Flow Dirubah:**
+   Saat kamu membuka menu Wish atau melakukan Gacha, backend (Go/C++) HoYoverse tidak langsung membaca `fate_points`. Sistem mengeksekusi logika ini di *level aplikasi*, bukan di database:
+   - Cek `last_banner_epoch_id` milik pemain.
+   - Bandingkan dengan `current_active_banner_id` di server global.
+   - **Jika berbeda** (artinya banner sudah ganti): Abaikan `fate_points` yang ada di database. Perlakukan pemain seolah poinnya 0. 
+   - Saat pemain melakukan gacha lagi, barulah sistem melakukan `UPDATE` dengan me-reset `fate_points = 0` dan mencatat `last_banner_epoch_id` yang baru.
+
+**Hasil:** Tidak ada proses *reset* massal yang membebani database di jam pergantian banner. Update data disebar (*distributed*) secara perlahan hanya pada saat pemain aktif membuka menu gacha.
+
+#### Skenario 6: Integrasi Cross-Save PlayStation (Identity Resolution)
+**Konteks Bisnis (Patch 1.0 - 1.6):**
+Akun PSN (PlayStation Network) terisolasi. Pemain PS4/PS5 hanya bisa bermain di konsol dan datanya tersimpan menggunakan `psn_account_id`. Pemain PC/Mobile menggunakan `hoyoverse_account_id`.
+
+**Business Rule Baru (Patch 2.0):**
+Pemain diizinkan menautkan (link) akun PSN ke email HoYoverse sehingga mereka bisa bermain silang (Cross-Save) di konsol dan PC/HP.
+
+**Masalah Arsitektur Database:**
+Ini adalah mimpi buruk *Identity Resolution*. Selama setahun, database terpecah. Sistem asli dirancang dengan relasi 1:1. Satu `uid` game menempel mati pada satu *authentication method*. Menggabungkan dua sistem identitas yang sebelumnya terpisah berisiko memunculkan duplikasi data, atau lebih parah, menimpa (*overwrite*) data karakter level 55 milik pemain dengan data level 1.
+
+**Eksekusi Migrasi & Data Flow (SSO & Conflict Resolution):**
+HoYoverse tidak "menggabungkan" tabel database PSN dan PC/Mobile. Mereka mengubah *flow* autentikasi dengan membangun layer **Identity Provider (IdP)** di tengahnya.
+
+1. **Schema UP (Mapping Table):**
+   Mereka membuat tabel baru `account_bindings` yang memisahkan antara entitas otentikasi (cara login) dengan `uid` (data game).
+2. **Business Constraint Implementation:**
+   Untuk mencegah konflik penimpaan data saat migrasi, HoYoverse menerapkan aturan bisnis yang ketat di level API, bukan di level database: *Akun PSN yang sudah memiliki data Genshin hanya bisa ditautkan ke email HoYoverse yang belum pernah dipakai main Genshin, dan sebaliknya.*
+3. **Data Flow Perubahan Login:**
+   - **Dulu:** Login PSN -> Cari `psn_id` di tabel utama -> Load Game Data.
+   - **Sekarang (Patch 2.0 ke atas):** Login PSN -> Hit API `account_bindings` -> Cek apakah `psn_id` terikat ke `hoyoverse_id` -> Jika ya, teruskan request menggunakan `hoyoverse_id` -> Load Game Data (UID).
+
+Dengan membangun tabel mapping yang baru (*account bindings*) alih-alih merombak skema identitas di tabel utama yang sudah menyimpan data jutaan pemain, HoYoverse berhasil menerapkan fitur sinkronisasi tanpa adanya risiko data pemain lama tertimpa atau hilang saat *downtime* pembaruan versi 2.0.
+
+---
+
+Migration memungkinkan arsitektur perangkat lunak yang *Agile*. Aplikasi sebesar Genshin Impact tidak harus menebak-nebak masa depan dengan melakukan *over-engineering* sejak awal. Mereka bisa berevolusi secara modular, aman, ter-automasi, dan konsisten di seluruh lingkungan server.
+
+---
+
+### Insiden "Dirty Database" pada Migration
+
+**Apa itu "Dirty State"?**
+Dalam `golang-migrate`, setiap kali kita menjalankan `migrate up`, tool ini akan:
+1. Mencatat di tabel `schema_migrations`: "Saya sedang mengerjakan versi X" (set `dirty = true`).
+2. Menjalankan query SQL di file migrasi.
+3. Jika SUKSES: Update tabel `schema_migrations`: "Versi X selesai" (set `dirty = false`).
+4. Jika GAGAL (karena syntax error, constraint terlanggar, timeout, dll): Proses berhenti seketika. Tabel `schema_migrations` **tetap mencatat `dirty = true`**.
+
+Ketika database dalam status `dirty`, `golang-migrate` akan **menolak** menjalankan perintah migrasi apapun (`up` atau `down`) sampai kita memperbaikinya secara manual. Ini adalah fitur keamanan agar kita tidak menimpa atau merusak data yang kondisinya sedang "menggantung" (setengah jalan).
+
+#### Skenario Real World (Di Production)
+
+Bayangkan Tokopedia sedang mengadakan flash sale besar-besaran, lalu tim engineer merilis fitur baru yang membutuhkan perubahan struktur database.
+
+**File Migration `00010_add_discount_to_cart.up.sql`:**
+```sql
+-- Query 1: Tambah kolom
+ALTER TABLE cart ADD COLUMN discount_amount INT DEFAULT 0;
+
+-- Query 2: Isi data (Misal syntax error typo DICS)
+UPDATE cart SET dicsount_amount = 10000 WHERE is_flash_sale = true; 
+```
+
+**Yang Terjadi Saat Deploy:**
+1. Pipeline CI/CD menjalankan `migrate up`.
+2. Query 1 sukses dieksekusi (kolom `discount_amount` tercipta).
+3. Query 2 gagal karena *typo* `dicsount_amount`.
+4. Migration gagal dan status menjadi **DIRTY**.
+
+#### Bagaimana Handlingnya di Production?
+
+Di tahap *Development* (lokal), kita bisa dengan santai menjalankan `migrate force 9` lalu me-*revert* semuanya. Namun di **Production**, kita **TIDAK BOLEH** asal `force` tanpa menganalisa. Kenapa? Karena data *production* sudah berubah (Query 1 sukses)!
+
+Jika kita langsung `force 9` lalu `migrate down`, sistem akan berasumsi kolom `discount_amount` belum ada, padahal sebenarnya sudah dibuat. Ini akan menyebabkan kekacauan.
+
+**Langkah Penanganan (Incident Response) oleh DBA / Tim Backend:**
+
+1. **Investigasi Kematian (Post-Mortem Cepat):**
+   DBA akan mengecek log error: *"Kenapa gagal?"*. Oh, ternyata ada *typo* di Query 2.
+2. **Inspeksi Database Manual:**
+   DBA akan masuk ke *database production* secara manual (via psql / DBeaver) dan mengecek: *"Sejauh mana query ini jalan sebelum gagal?"*.
+   - Apakah kolom `discount_amount` sudah ada? **Ya.**
+   - Apakah datanya sudah ter-update? **Belum.**
+3. **Pembersihan Manual (Manual Rollback/Fix):**
+   Karena database PostgreSQL mendukung DDL Transaction (perubahan struktur bisa di-rollback), terkadang seluruh file otomatis di-rollback. 
+   - **Jika tidak di-rollback otomatis:** DBA akan menghapus kolom itu secara manual: `ALTER TABLE cart DROP COLUMN discount_amount;` agar kondisi database kembali persis seperti versi 9.
+4. **Force Version (Penyelarasan State):**
+   Setelah yakin struktur database sudah kembali 100% seperti versi 9 (sebelum migrasi gagal tadi), barulah eksekusi:
+   ```bash
+   migrate -path ./migrations -database "$DB_URL" force 9
+   ```
+   Ini memberitahu tool: *"Oke, saya sudah bersihkan kekacauannya secara manual. Anggap saja kita sekarang berada di versi 9 yang bersih."*
+5. **Perbaikan Kode & Deploy Ulang:**
+   Engineer memperbaiki *typo* di file migrasi, lalu melakukan *commit* & *push* ulang. CI/CD akan menjalankan `migrate up` lagi dari versi 9 ke 10 yang sudah benar.
+
+**Pelajaran Penting (Best Practices):**
+*   **Test di Staging:** Selalu jalankan migrasi di lingkungan *Staging* (yang punya *copy* data mirip *Production*) sebelum melemparnya ke *Production*. 99% error *dirty state* harusnya ketahuan di sini.
+*   **Satu File, Satu Tujuan:** Jangan menggabungkan terlalu banyak DDL (perubahan struktur) dan DML (perubahan data) dalam satu file migrasi. Semakin besar filenya, semakin susah menganalisa state *"menggantung"* jika terjadi kegagalan.
+*   **Gunakan Database dengan DDL Transaction:** PostgreSQL mendukung *transactional DDL* (bisa `ROLLBACK` saat gagal). MySQL tidak. Di PostgreSQL, jika migrasi gagal di tengah jalan, seluruh perubahan dalam file itu biasanya otomatis dibatalkan, membuat proses pembersihan jauh lebih mudah.
