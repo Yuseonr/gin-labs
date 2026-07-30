@@ -4,6 +4,9 @@ source : https://youtu.be/h3fqD6IprIA?si=mM7ftkpqU8OYoLeA
 ```
 ---
 
+> Repo      : [PROJECT REPOSITORY](https://github.com/Yuseonr/social-go)<br>
+> Old one	: prob in this repo commit history, albeit the new one is clearer and more complete
+
 ## The `net/http` Package
 
 > **`net/http`** adalah standard library bawaan Go untuk membangun HTTP client dan HTTP server secara native tanpa framework
