@@ -81,3 +81,76 @@ func (app *application) healthCheckHandler(w http.ResponseWriter, r *http.Reques
 }
 ```
 
+### User Feed Post
+```GO
+		// v1/posts/
+		r.Route("/posts", func(r chi.Router) {
+			r.Post("/", app.createPostHandler)
+		})
+```
+```GO
+package main
+
+import (
+	"net/http"
+
+	"github.com/Yuseonr/social-go/social-api/internal/store"
+)
+
+type CreatePostPayload struct {
+	Content string `json:"content"`
+	Title   string `json:"title"`
+	Tags    []string `json:"tags"`
+}
+
+func (app *application) createPostHandler(w http.ResponseWriter, r *http.Request) {
+	// the below code has a problem
+	// because we are using post as the struct, the client 
+	// could send a request with the id, created_at, and updated_at fields, 
+	// which we don't want to allow
+
+	// var post Store.post
+
+	// maka dari itu kita perlu DTO / objek data berbeda yang berfungsi untuk
+	// menentukan bentuk objek yang boleh dikirim oleh client, dan 
+	// kita yang akan memap ke objek model yang akan disimpan ke database
+	
+	var payload CreatePostPayload
+
+	if err := readJSON(w, r, &payload); err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	posts := &store.Post{
+		Title:   payload.Title,
+		Content: payload.Content,
+		UserID:  1, // TODO : change after auth
+		Tags:    payload.Tags,
+	}
+
+	ctx := r.Context()
+
+	if err := app.store.Posts.Create(ctx, posts); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	if err := writeJSON(w, http.StatusCreated, posts); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+}
+```
+
+### Using Postman from VSCODE for testing the API
+```
+{
+    "title" : "new post!",
+    "content" : "testing new post!",
+    "tags": ["tags2"]
+}
+```
+
+### Misal Migration gagal dan corupt state
+```bisa undo dari database -> ke schema version sebelumnya, corupt = false```
