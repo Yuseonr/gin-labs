@@ -154,3 +154,76 @@ func (app *application) createPostHandler(w http.ResponseWriter, r *http.Request
 
 ### Misal Migration gagal dan corupt state
 ```bisa undo dari database -> ke schema version sebelumnya, corupt = false```
+
+### Getting Post 
+```Go
+r.Route("/{postID}", func (r chi.Router){
+				r.Get("/", app.getPostHandler)
+			})
+
+
+func (app *application) getPostHandler(w http.ResponseWriter, r *http.Request) {
+	// ambil postID dari URL param, cara kalo di chi
+    idParam := chi.URLParam(r, "postID")
+	id, err := strconv.ParseInt(idParam, 10, 64)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	ctx := r.Context()
+
+	post, err := app.store.Posts.GetByID(ctx, id)
+
+    // handle error, misal post not found
+    // error ini dari mana? dari store.Posts.GetByID, yang return error
+	if err != nil {
+		switch {
+		case errors.Is(err, store.ErrNotFound):
+			writeJSONError(w, http.StatusNotFound, err.Error())
+		default:
+			writeJSONError(w, http.StatusInternalServerError, err.Error())
+		}
+		return
+	}
+	if err := writeJSON(w, http.StatusCreated, post); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+}
+
+// ini yang ada di store/post.go
+// kurleb repository layer, yang berfungsi untuk mengambil data dari database
+func (s *PostStore) GetByID(ctx context.Context, PostId int64) (*Post, error) {
+
+	var returnPost Post
+	
+	query := `
+	select id, content, title, user_id, tags, created_at, updated_at from posts
+	where id = $1
+	`
+
+	err := s.db.QueryRowContext(
+		ctx, 
+		query,
+		PostId,
+	).Scan(
+		&returnPost.ID,
+		&returnPost.Content,
+		&returnPost.Title,
+		&returnPost.UserID,
+		pq.Array(&returnPost.Tags),
+		&returnPost.CreatedAt,
+		&returnPost.UpdatedAt,
+	)
+	if err != nil {
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			return nil, ErrNotFound
+		default:
+			return nil, err
+		}
+	}
+	return &returnPost, nil
+}
+```
